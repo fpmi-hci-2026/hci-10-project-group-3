@@ -1,0 +1,3511 @@
+openapi: 3.0.3
+info:
+  title: Pinkmine API
+  version: 1.0.0
+  description: |
+    REST API системы управления проектами Pinkmine (веб-клиент, Android-приложение на Flutter, сервер на Python и Flask).
+
+    Спецификация построена по модели требований (задание 1), физической модели данных PostgreSQL (задание 2)
+    и таблице «вариант использования → конечная точка» (задание 3) лабораторной работы № 4.
+
+    Общие соглашения:
+    - JSON в формате camelCase, коды статусов и типов задач в нижнем регистре (`in_progress`);
+    - все методы, кроме регистрации, входа, подтверждения email, сброса пароля и просмотра приглашения, требуют `Authorization: Bearer <token>`;
+    - ошибка всегда возвращается объектом `Error` с полями `errorCode`, `message`, `details`, `traceId`;
+    - доступ к объектам чужих проектов отвечает 404, не раскрывая их существование;
+    - изменения задачи передают `version` (оптимистическая блокировка, противоречие H3), при расхождении сервер отвечает 409 и возвращает актуальное состояние задачи;
+    - задачи архивного проекта доступны только для чтения (409 `PROJECT_ARCHIVED`).
+  contact:
+    name: Команда Pinkmine (группа 10, ФПМИ БГУ)
+    url: https://github.com/fpmi-hci-2026/hci-10-project-group-3
+servers:
+  - url: http://localhost:4010
+    description: Локальный mock-сервер (mock/mock_server.py)
+  - url: http://localhost:5000
+    description: Локальный сервер Flask
+tags:
+  - name: auth
+    description: Регистрация, вход, подтверждение email, восстановление пароля
+  - name: profile
+    description: Профиль текущего пользователя и справочники
+  - name: roles
+    description: Глобальные роли и права (администратор системы)
+  - name: projects
+    description: Проекты и архив
+  - name: members
+    description: Команда проекта и поиск пользователей
+  - name: invites
+    description: Приглашения по email
+  - name: tasks
+    description: Задачи, статусы, исполнитель, срок, история
+  - name: comments
+    description: Обсуждение задачи
+  - name: attachments
+    description: Вложения задачи
+  - name: tags
+    description: Теги проекта
+  - name: notifications
+    description: Лента уведомлений и токены устройств
+security:
+  - bearerAuth: []
+paths:
+  /api/auth/register:
+    post:
+      tags: [auth]
+      operationId: registerUser
+      summary: Зарегистрироваться
+      description: "UC-A1. Актор: новый пользователь. После регистрации отправляется письмо подтверждения email (FR-04), вход разрешён и до подтверждения. Если передан `inviteToken`, пользователь сразу становится участником проекта из приглашения (FR-17)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            example:
+              login: ryan
+              email: ryan@pinkmine.by
+              password: Secret-2026
+              firstName: Райан
+              lastName: Мельник
+      responses:
+        '201':
+          description: Учётная запись создана
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+              example:
+                id: 12
+                login: ryan
+                email: ryan@pinkmine.by
+                firstName: Райан
+                lastName: Мельник
+                role: member
+                emailConfirmed: false
+                permissions: [task.create, task.change_status, comment.create]
+                createdAt: '2026-10-21T09:00:00Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          description: Логин или email уже заняты (FR-02)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                emailTaken:
+                  value:
+                    errorCode: EMAIL_TAKEN
+                    message: Этот email уже используется
+                    details: [{field: email, reason: NOT_UNIQUE}]
+                    traceId: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+                loginTaken:
+                  value:
+                    errorCode: LOGIN_TAKEN
+                    message: Этот логин уже занят
+                    details: [{field: login, reason: NOT_UNIQUE}]
+                    traceId: 7a2b3c4d-5e6f-4a70-8b9c-0d1e2f3a4b5c
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          description: Токен приглашения недействителен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                errorCode: INVITE_INVALID
+                message: Приглашение недействительно, обратитесь к менеджеру проекта
+                details: [{field: inviteToken, reason: EXPIRED_OR_REVOKED}]
+                traceId: 8b3c4d5e-6f70-4a81-9c0d-1e2f3a4b5c6d
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/auth/email/confirm:
+    post:
+      tags: [auth]
+      operationId: confirmEmail
+      summary: Подтвердить email
+      description: "UC-A2. Актор: новый пользователь. Токен из письма одноразовый и ограничен по времени."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRequest'
+            example:
+              token: q8Zt1mVYc3n0XkR4bP7wHs
+      responses:
+        '200':
+          description: Email подтверждён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailConfirmResult'
+              example:
+                emailConfirmed: true
+                emailConfirmedAt: '2026-10-21T09:05:12Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/TokenInvalid'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: Войти в систему
+      description: "UC-A3. Актор: участник команды, менеджер проекта, администратор. Выдаёт JWT-токен доступа (FR-05)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              login: jessica
+              password: Secret-2026
+      responses:
+        '200':
+          description: Вход выполнен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+              example:
+                accessToken: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMSJ9.signature
+                tokenType: Bearer
+                expiresIn: 3600
+                user:
+                  id: 11
+                  login: jessica
+                  email: jessica@pinkmine.by
+                  firstName: Джесика
+                  lastName: Ковалёва
+                  role: manager
+                  emailConfirmed: true
+                  permissions: [project.create, project.archive, member.add, member.remove, task.create, task.assign, task.set_due_date, task.change_status, task.review, task.close, comment.create]
+                  createdAt: '2026-09-01T08:00:00Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Неверный логин или пароль
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                errorCode: INVALID_CREDENTIALS
+                message: Неверный логин или пароль
+                details: []
+                traceId: 9c4d5e6f-7081-4a92-8d1e-2f3a4b5c6d7e
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: Выйти из системы
+      description: "UC-A4. Токен доступа вносится в список отозванных."
+      responses:
+        '204':
+          description: Выход выполнен
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/auth/password/forgot:
+    post:
+      tags: [auth]
+      operationId: forgotPassword
+      summary: Запросить сброс пароля
+      description: "UC-A5. Ответ одинаковый независимо от того, зарегистрирован ли адрес (FR-06)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordForgotRequest'
+            example:
+              email: ryan@pinkmine.by
+      responses:
+        '202':
+          description: Запрос принят, письмо отправляется, если адрес зарегистрирован
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResult'
+              example:
+                message: Если адрес зарегистрирован, на него отправлено письмо со ссылкой для сброса пароля
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/auth/password/reset:
+    post:
+      tags: [auth]
+      operationId: resetPassword
+      summary: Задать новый пароль
+      description: "UC-A6. Ссылка одноразовая; после смены пароля все активные сессии пользователя завершаются (FR-07)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequest'
+            example:
+              token: u2Hc9LmQe5tYvB1sN8kD0a
+              newPassword: NewSecret-2026
+      responses:
+        '204':
+          description: Пароль изменён
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/TokenInvalid'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/me:
+    get:
+      tags: [profile]
+      operationId: getMe
+      summary: Получить профиль текущего пользователя
+      description: "UC-A9. Профиль, глобальная роль и права для отображения доступных действий (FR-09)."
+      responses:
+        '200':
+          description: Профиль пользователя
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+              example:
+                id: 12
+                login: ryan
+                email: ryan@pinkmine.by
+                firstName: Райан
+                lastName: Мельник
+                role: member
+                emailConfirmed: true
+                permissions: [task.create, task.change_status, comment.create]
+                createdAt: '2026-09-01T08:10:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/dictionaries:
+    get:
+      tags: [profile]
+      operationId: getDictionaries
+      summary: Получить справочники
+      description: "UC-A9. Статусы и типы задач, роли (таблицы task_statuses, task_types, roles)."
+      responses:
+        '200':
+          description: Справочники
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dictionaries'
+              example:
+                taskStatuses:
+                  - {code: new, name: Новая, sortOrder: 1, isCompleted: false}
+                  - {code: in_progress, name: В работе, sortOrder: 2, isCompleted: false}
+                  - {code: review, name: На проверке, sortOrder: 3, isCompleted: false}
+                  - {code: postponed, name: Отложена, sortOrder: 4, isCompleted: false}
+                  - {code: done, name: Готова, sortOrder: 5, isCompleted: true}
+                  - {code: closed, name: Закрыта, sortOrder: 6, isCompleted: true}
+                taskTypes:
+                  - {code: task, name: Задача}
+                  - {code: bug, name: Ошибка}
+                  - {code: improvement, name: Улучшение}
+                  - {code: idea, name: Идея}
+                  - {code: meeting, name: Встреча}
+                roles:
+                  - {code: admin, name: Администратор системы}
+                  - {code: manager, name: Менеджер проекта}
+                  - {code: member, name: Участник команды}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/roles:
+    get:
+      tags: [roles]
+      operationId: listRoles
+      summary: Просмотреть роли и их права
+      description: "UC-A7. Актор: администратор системы (право role.manage). Остальным ролям возвращается 403 (FR-10)."
+      responses:
+        '200':
+          description: Роли с правами
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Role'
+              example:
+                - {id: 1, code: admin, name: Администратор системы, permissions: [project.create, project.archive, project.delete, member.add, member.remove, task.create, task.assign, task.set_due_date, task.change_status, task.review, task.close, comment.create, role.manage]}
+                - {id: 2, code: manager, name: Менеджер проекта, permissions: [project.create, project.archive, member.add, member.remove, task.create, task.assign, task.set_due_date, task.change_status, task.review, task.close, comment.create]}
+                - {id: 3, code: member, name: Участник команды, permissions: [task.create, task.change_status, comment.create]}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RoleManageForbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/permissions:
+    get:
+      tags: [roles]
+      operationId: listPermissions
+      summary: Просмотреть перечень прав
+      description: "UC-A7. Актор: администратор системы."
+      responses:
+        '200':
+          description: Права
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Permission'
+              example:
+                - {code: project.create, description: Создавать проекты}
+                - {code: task.close, description: Закрывать задачу}
+                - {code: role.manage, description: Настраивать права ролей}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RoleManageForbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/roles/{roleId}/permissions:
+    put:
+      tags: [roles]
+      operationId: replaceRolePermissions
+      summary: Изменить права роли
+      description: "UC-A8. Полностью заменяет набор прав роли. Изменения применяются при следующем действии пользователя (FR-09). У роли admin нельзя снять право role.manage."
+      parameters:
+        - $ref: '#/components/parameters/RoleId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RolePermissionsUpdate'
+            example:
+              permissions: [task.create, task.change_status, comment.create, task.set_due_date]
+      responses:
+        '200':
+          description: Права роли обновлены
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Role'
+              example:
+                id: 3
+                code: member
+                name: Участник команды
+                permissions: [task.create, task.change_status, comment.create, task.set_due_date]
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RoleManageForbidden'
+        '404':
+          description: Роль не найдена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                errorCode: ROLE_NOT_FOUND
+                message: Роль не найдена
+                details: []
+                traceId: 0d5e6f70-8192-4aa3-9e2f-3a4b5c6d7e8f
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          description: Неизвестное право или попытка снять role.manage с администратора
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                unknownPermission:
+                  value:
+                    errorCode: UNKNOWN_PERMISSION
+                    message: Указано неизвестное право
+                    details: [{field: 'permissions[3]', reason: NOT_FOUND}]
+                    traceId: 1e6f7081-92a3-4bb4-8f30-4b5c6d7e8f90
+                adminLockout:
+                  value:
+                    errorCode: ADMIN_LOCKOUT
+                    message: Нельзя снять право настройки ролей с администратора
+                    details: [{field: permissions, reason: ROLE_MANAGE_REQUIRED}]
+                    traceId: 2f708192-a3b4-4cc5-9041-5c6d7e8f9a01
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/projects:
+    get:
+      tags: [projects]
+      operationId: listProjects
+      summary: Просмотреть список проектов
+      description: "UC-P2. Проекты, в которых состоит пользователь (администратору доступны все). Архивные скрыты, доступны фильтром `archived=true` (FR-18)."
+      parameters:
+        - name: archived
+          in: query
+          description: Активные (false), архивные (true) или все (all)
+          schema:
+            type: string
+            enum: ['false', 'true', all]
+            default: 'false'
+        - name: q
+          in: query
+          description: Поиск по названию
+          schema:
+            type: string
+            maxLength: 100
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: Страница проектов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectPage'
+              example:
+                items:
+                  - id: 7
+                    name: Pinkmine Mobile
+                    description: Android-клиент на Flutter
+                    archived: false
+                    archivedAt: null
+                    createdBy: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                    createdAt: '2026-09-02T10:00:00Z'
+                    myRole: manager
+                    taskCounts: {new: 3, in_progress: 4, review: 1, postponed: 0, done: 5, closed: 9}
+                page: 1
+                size: 20
+                total: 1
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [projects]
+      operationId: createProject
+      summary: Создать проект
+      description: "UC-P1. Актор: менеджер проекта (право project.create). Создатель становится менеджером проекта, рабочее пространство создаётся автоматически (FR-11)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectCreate'
+            example:
+              name: Pinkmine Mobile
+              description: Android-клиент на Flutter
+      responses:
+        '201':
+          description: Проект создан
+          headers:
+            Location:
+              description: Адрес созданного проекта
+              schema:
+                type: string
+                example: /api/projects/7
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+              example:
+                id: 7
+                name: Pinkmine Mobile
+                description: Android-клиент на Flutter
+                archived: false
+                archivedAt: null
+                createdBy: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                createdAt: '2026-10-21T09:00:00Z'
+                myRole: manager
+                taskCounts: {}
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Нет права project.create
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                errorCode: PROJECT_CREATE_FORBIDDEN
+                message: Создавать проекты может менеджер проекта
+                details: []
+                traceId: 3a8192a3-b4c5-4dd6-8152-6d7e8f9a0b12
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/projects/{projectId}:
+    get:
+      tags: [projects]
+      operationId: getProject
+      summary: Открыть проект
+      description: "UC-P2. Карточка проекта со счётчиками задач по статусам."
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200':
+          description: Проект
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+              example:
+                id: 7
+                name: Pinkmine Mobile
+                description: Android-клиент на Flutter
+                archived: false
+                archivedAt: null
+                createdBy: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                createdAt: '2026-09-02T10:00:00Z'
+                myRole: member
+                taskCounts: {new: 3, in_progress: 4, review: 1, postponed: 0, done: 5, closed: 9}
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/ProjectNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [projects]
+      operationId: deleteProject
+      summary: Удалить проект
+      description: "UC-P10. Актор: администратор системы (право project.delete, FR-20). Удаляется только архивный проект вместе с задачами (H4)."
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '204':
+          description: Проект удалён
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Нет права project.delete
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                errorCode: PROJECT_DELETE_FORBIDDEN
+                message: Удалить проект может только администратор системы
+                details: []
+                traceId: 4b92a3b4-c5d6-4ee7-9263-7e8f9a0b1c23
+        '404':
+          $ref: '#/components/responses/ProjectNotFound'
+        '409':
+          description: Проект не в архиве
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                errorCode: PROJECT_NOT_ARCHIVED
+                message: Перед удалением проект нужно архивировать
+                details: []
+                traceId: 5ca3b4c5-d6e7-4ff8-8374-8f9a0b1c2d34
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/projects/{projectId}/archive:
+    patch:
+      tags: [projects]
+      operationId: setProjectArchived
+      summary: Архивировать проект или вернуть из архива
+      description: "UC-P9. Актор: менеджер проекта (право project.archive). Повторная отправка того же значения не меняет проект и возвращает 200."
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectArchiveRequest'
+            example:
+              archived: true
+      responses:
+        '200':
+          description: Состояние архива изменено
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+              example:
+                id: 7
+                name: Pinkmine Mobile
+                description: Android-клиент на Flutter
+                archived: true
+                archivedAt: '2026-10-21T12:00:00Z'
+                createdBy: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                createdAt: '2026-09-02T10:00:00Z'
+                myRole: manager
+                taskCounts: {new: 0, in_progress: 0, review: 0, postponed: 0, done: 2, closed: 20}
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Нет права project.archive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                errorCode: PROJECT_ARCHIVE_FORBIDDEN
+                message: Архивировать проект может менеджер проекта
+                details: []
+                traceId: 6db4c5d6-e7f8-4a09-9485-9a0b1c2d3e45
+        '404':
+          $ref: '#/components/responses/ProjectNotFound'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/projects/{projectId}/members:
+    get:
+      tags: [members]
+      operationId: listMembers
+      summary: Просмотреть команду проекта
+      description: "UC-P4. Участники с ролью и контактными данными (FR-14)."
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200':
+          description: Команда проекта
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Member'
+              example:
+                - user: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                  role: manager
+                  joinedAt: '2026-09-02T10:00:00Z'
+                - user: {id: 12, login: ryan, firstName: Райан, lastName: Мельник, email: ryan@pinkmine.by}
+                  role: member
+                  joinedAt: '2026-09-03T08:30:00Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/ProjectNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [members]
+      operationId: addMember
+      summary: Добавить участника в команду
+      description: "UC-P3. Актор: менеджер проекта (право member.add). Добавляется зарегистрированный пользователь, найденный через `GET /api/users` (FR-12, FR-13)."
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemberAdd'
+            example:
+              userId: 12
+              role: member
+      responses:
+        '201':
+          description: Участник добавлен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Member'
+              example:
+                user: {id: 12, login: ryan, firstName: Райан, lastName: Мельник, email: ryan@pinkmine.by}
+                role: member
+                joinedAt: '2026-10-21T09:10:00Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/MemberManageForbidden'
+        '404':
+          description: Проект или пользователь не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                projectNotFound:
+                  value:
+                    errorCode: PROJECT_NOT_FOUND
+                    message: Проект не найден
+                    details: []
+                    traceId: 7ec5d6e7-f809-4b1a-85a6-0b1c2d3e4f56
+                userNotFound:
+                  value:
+                    errorCode: USER_NOT_FOUND
+                    message: Пользователь не найден
+                    details: [{field: userId, reason: NOT_FOUND}]
+                    traceId: 8fd6e7f8-091a-4c2b-96b7-1c2d3e4f5a67
+        '409':
+          description: Пользователь уже в команде или проект в архиве
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                alreadyMember:
+                  value:
+                    errorCode: MEMBER_ALREADY_EXISTS
+                    message: Пользователь уже состоит в проекте
+                    details: [{field: userId, reason: ALREADY_MEMBER}]
+                    traceId: 90e7f809-1a2b-4d3c-87c8-2d3e4f5a6b78
+                projectArchived:
+                  $ref: '#/components/examples/ProjectArchived'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/projects/{projectId}/members/{userId}:
+    delete:
+      tags: [members]
+      operationId: removeMember
+      summary: Исключить участника из проекта
+      description: "UC-P11. Актор: менеджер проекта (право member.remove). Нельзя исключить участника с назначенными задачами (составной FK tasks → project_members) и последнего менеджера."
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '204':
+          description: Участник исключён
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/MemberManageForbidden'
+        '404':
+          description: Проект не найден или пользователь не состоит в нём
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                errorCode: MEMBER_NOT_FOUND
+                message: Участник не найден в проекте
+                details: []
+                traceId: a1f8091a-2b3c-4e4d-98d9-3e4f5a6b7c89
+        '409':
+          description: Исключение нарушит правила проекта
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                hasAssignedTasks:
+                  value:
+                    errorCode: MEMBER_HAS_ASSIGNED_TASKS
+                    message: Сначала переназначьте задачи участника
+                    details: [{field: userId, reason: ASSIGNED_TASKS_EXIST}]
+                    traceId: b2091a2b-3c4d-4f5e-89ea-4f5a6b7c8d9a
+                lastManager:
+                  value:
+                    errorCode: LAST_MANAGER
+                    message: В проекте должен остаться хотя бы один менеджер
+                    details: []
+                    traceId: c31a2b3c-4d5e-4a6f-9afb-5a6b7c8d9eab
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/users:
+    get:
+      tags: [members]
+      operationId: searchUsers
+      summary: Найти пользователя по имени или email
+      description: "UC-P3. Актор: менеджер проекта (право member.add). Возвращает не более 20 пользователей."
+      parameters:
+        - name: query
+          in: query
+          required: true
+          description: Часть имени, фамилии, логина или email
+          schema:
+            type: string
+            minLength: 2
+            maxLength: 100
+          example: рай
+      responses:
+        '200':
+          description: Найденные пользователи
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 20
+                items:
+                  $ref: '#/components/schemas/UserShort'
+              example:
+                - {id: 12, login: ryan, firstName: Райан, lastName: Мельник, email: ryan@pinkmine.by}
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/MemberManageForbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/projects/{projectId}/invites:
+    get:
+      tags: [invites]
+      operationId: listInvites
+      summary: Просмотреть приглашения
+      description: "UC-P6. Актор: менеджер проекта (право member.add). По умолчанию только ожидающие приглашения (FR-16)."
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [active, all]
+            default: active
+      responses:
+        '200':
+          description: Приглашения проекта
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Invitation'
+              example:
+                - id: 31
+                  email: anna@mail.by
+                  role: member
+                  invitedBy: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                  createdAt: '2026-10-20T10:00:00Z'
+                  expiresAt: '2026-10-27T10:00:00Z'
+                  state: active
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/MemberManageForbidden'
+        '404':
+          $ref: '#/components/responses/ProjectNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [invites]
+      operationId: createInvite
+      summary: Пригласить участника по email
+      description: "UC-P5. Актор: менеджер проекта (право member.add). Ссылка действует 7 дней. Повторное приглашение на тот же email отзывает предыдущее и выдаёт новое (H1, FR-15, FR-16)."
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InvitationCreate'
+            example:
+              email: anna@mail.by
+              role: member
+      responses:
+        '201':
+          description: Приглашение создано, письмо поставлено в очередь отправки
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invitation'
+              example:
+                id: 32
+                email: anna@mail.by
+                role: member
+                invitedBy: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                createdAt: '2026-10-21T09:00:00Z'
+                expiresAt: '2026-10-28T09:00:00Z'
+                state: active
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/MemberManageForbidden'
+        '404':
+          $ref: '#/components/responses/ProjectNotFound'
+        '409':
+          description: Пользователь с этим email уже в команде или проект в архиве
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                alreadyMember:
+                  value:
+                    errorCode: MEMBER_ALREADY_EXISTS
+                    message: Пользователь с этим email уже состоит в проекте
+                    details: [{field: email, reason: ALREADY_MEMBER}]
+                    traceId: d42b3c4d-5e6f-4b70-8b0c-6b7c8d9eafbc
+                projectArchived:
+                  $ref: '#/components/examples/ProjectArchived'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/projects/{projectId}/invites/{inviteId}:
+    delete:
+      tags: [invites]
+      operationId: revokeInvite
+      summary: Отозвать приглашение
+      description: "UC-P6. Актор: менеджер проекта (право member.add)."
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - name: inviteId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+          example: 31
+      responses:
+        '204':
+          description: Приглашение отозвано
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/MemberManageForbidden'
+        '404':
+          $ref: '#/components/responses/InviteNotFound'
+        '409':
+          description: Приглашение уже принято, отозвано или истекло
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                errorCode: INVITE_NOT_ACTIVE
+                message: Приглашение уже недействительно
+                details: []
+                traceId: e53c4d5e-6f70-4c81-9c1d-7c8d9eafb0cd
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/invites/{token}:
+    get:
+      tags: [invites]
+      operationId: getInvite
+      summary: Просмотреть приглашение по ссылке
+      description: "UC-P7. Актор: приглашённый (возможно, ещё не зарегистрированный). По данным заполняется форма регистрации (FR-17)."
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/InviteToken'
+      responses:
+        '200':
+          description: Действующее приглашение
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitationPreview'
+              example:
+                projectId: 7
+                projectName: Pinkmine Mobile
+                email: anna@mail.by
+                role: member
+                invitedBy: {firstName: Джесика, lastName: Ковалёва}
+                expiresAt: '2026-10-28T09:00:00Z'
+                userExists: false
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/InviteNotFound'
+        '410':
+          $ref: '#/components/responses/InviteGone'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/invites/{token}/accept:
+    post:
+      tags: [invites]
+      operationId: acceptInvite
+      summary: Принять приглашение
+      description: "UC-P8. Актор: вошедший пользователь, email которого совпадает с адресом приглашения. Повторное принятие тем же пользователем возвращает 200."
+      parameters:
+        - $ref: '#/components/parameters/InviteToken'
+      responses:
+        '200':
+          description: Пользователь стал участником проекта
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitationAcceptResult'
+              example:
+                projectId: 7
+                role: member
+                joinedAt: '2026-10-21T11:00:00Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Приглашение выдано на другой email
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                errorCode: INVITE_EMAIL_MISMATCH
+                message: Приглашение выдано на другой адрес
+                details: []
+                traceId: f64d5e6f-7081-4d92-8d2e-8d9eafb0c1de
+        '404':
+          $ref: '#/components/responses/InviteNotFound'
+        '410':
+          $ref: '#/components/responses/InviteGone'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/projects/{projectId}/tasks:
+    get:
+      tags: [tasks]
+      operationId: listProjectTasks
+      summary: Просмотреть задачи проекта с фильтрами
+      description: "UC-T7. Список и Канбан-доска. Фильтры применяются одновременно (FR-33), значения одного фильтра объединяются по ИЛИ: `?status=new&status=in_progress`."
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - name: status
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/TaskStatusCode'
+          example: [in_progress, review]
+        - name: type
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/TaskTypeCode'
+        - name: assigneeId
+          in: query
+          description: Исполнитель; `0` означает «без исполнителя»
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: tagId
+          in: query
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: dueFrom
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: dueTo
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: overdue
+          in: query
+          description: Только просроченные (срок прошёл, статус не done и не closed, FR-51)
+          schema:
+            type: boolean
+        - name: q
+          in: query
+          description: Поиск по названию и описанию
+          schema:
+            type: string
+            maxLength: 100
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [dueDate, -dueDate, updatedAt, -updatedAt]
+            default: -updatedAt
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: Страница задач
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskPage'
+              example:
+                items:
+                  - id: 42
+                    projectId: 7
+                    title: Экран «Мои задачи»
+                    description: Список задач исполнителя с быстрыми фильтрами
+                    status: in_progress
+                    type: task
+                    author: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                    assignee: {id: 12, login: ryan, firstName: Райан, lastName: Мельник, email: ryan@pinkmine.by}
+                    dueDate: '2026-10-25'
+                    overdue: false
+                    tags: [{id: 3, name: android, color: '#3DDC84'}]
+                    version: 4
+                    createdAt: '2026-10-14T07:00:00Z'
+                    updatedAt: '2026-10-20T15:42:00Z'
+                page: 1
+                size: 20
+                total: 1
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/ProjectNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [tasks]
+      operationId: createTask
+      summary: Создать задачу
+      description: "UC-T1. Актор: менеджер проекта, участник команды (право task.create). Задача получает статус new и version 1 (FR-24). Исполнитель только из участников проекта (FR-22), срок не в прошлом (FR-23). Назначение исполнителя и срока при создании требует прав task.assign и task.set_due_date (FR-25)."
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCreate'
+            example:
+              title: Экран «Мои задачи»
+              description: Список задач исполнителя с быстрыми фильтрами
+              type: task
+              assigneeId: 12
+              dueDate: '2026-10-25'
+              tagIds: [3]
+      responses:
+        '201':
+          description: Задача создана
+          headers:
+            Location:
+              description: Адрес созданной задачи
+              schema:
+                type: string
+                example: /api/tasks/42
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              example:
+                id: 42
+                projectId: 7
+                title: Экран «Мои задачи»
+                description: Список задач исполнителя с быстрыми фильтрами
+                status: new
+                type: task
+                author: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                assignee: {id: 12, login: ryan, firstName: Райан, lastName: Мельник, email: ryan@pinkmine.by}
+                dueDate: '2026-10-25'
+                overdue: false
+                tags: [{id: 3, name: android, color: '#3DDC84'}]
+                version: 1
+                createdAt: '2026-10-21T09:00:00Z'
+                updatedAt: '2026-10-21T09:00:00Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Нет права task.create, task.assign или task.set_due_date
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                createForbidden:
+                  value:
+                    errorCode: TASK_CREATE_FORBIDDEN
+                    message: Недостаточно прав для создания задачи
+                    details: []
+                    traceId: 075e6f70-8192-4ea3-9e3f-9eafb0c1d2ef
+                assignForbidden:
+                  value:
+                    errorCode: TASK_ASSIGN_FORBIDDEN
+                    message: Назначать исполнителя может менеджер проекта
+                    details: [{field: assigneeId, reason: PERMISSION_REQUIRED}]
+                    traceId: 186f7081-92a3-4fb4-8f40-afb0c1d2e3f0
+        '404':
+          $ref: '#/components/responses/ProjectNotFound'
+        '409':
+          description: Проект в архиве (FR-19)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                projectArchived:
+                  $ref: '#/components/examples/ProjectArchived'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          description: Нарушено бизнес-правило
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                assigneeNotMember:
+                  $ref: '#/components/examples/AssigneeNotMember'
+                dueDateInPast:
+                  $ref: '#/components/examples/DueDateInPast'
+                tagNotInProject:
+                  $ref: '#/components/examples/TagNotInProject'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/me/tasks:
+    get:
+      tags: [tasks]
+      operationId: listMyTasks
+      summary: Просмотреть «Мои задачи»
+      description: "UC-T8. Задачи, где текущий пользователь исполнитель, во всех активных проектах."
+      parameters:
+        - name: status
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/TaskStatusCode'
+        - name: overdue
+          in: query
+          schema:
+            type: boolean
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [dueDate, -dueDate, updatedAt, -updatedAt]
+            default: dueDate
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: Страница задач исполнителя
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskPage'
+              example:
+                items:
+                  - id: 42
+                    projectId: 7
+                    title: Экран «Мои задачи»
+                    description: null
+                    status: in_progress
+                    type: task
+                    author: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                    assignee: {id: 12, login: ryan, firstName: Райан, lastName: Мельник, email: ryan@pinkmine.by}
+                    dueDate: '2026-10-19'
+                    overdue: true
+                    tags: []
+                    version: 4
+                    createdAt: '2026-10-14T07:00:00Z'
+                    updatedAt: '2026-10-20T15:42:00Z'
+                page: 1
+                size: 20
+                total: 1
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/tasks/{taskId}:
+    get:
+      tags: [tasks]
+      operationId: getTask
+      summary: Открыть карточку задачи
+      description: "UC-T9. Карточка задачи с тегами и счётчиками обсуждения и вложений."
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: Задача
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDetails'
+              example:
+                id: 42
+                projectId: 7
+                title: Экран «Мои задачи»
+                description: Список задач исполнителя с быстрыми фильтрами
+                status: review
+                type: task
+                author: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                assignee: {id: 12, login: ryan, firstName: Райан, lastName: Мельник, email: ryan@pinkmine.by}
+                dueDate: '2026-10-25'
+                overdue: false
+                tags: [{id: 3, name: android, color: '#3DDC84'}]
+                version: 5
+                createdAt: '2026-10-14T07:00:00Z'
+                updatedAt: '2026-10-21T08:15:00Z'
+                commentCount: 2
+                attachmentCount: 1
+                projectArchived: false
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/TaskNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [tasks]
+      operationId: updateTask
+      summary: Редактировать задачу
+      description: "UC-T6. Изменяет название, описание и тип. Смена типа требует права task.assign (FR-25). Передаётся хотя бы одно изменяемое поле и `version`."
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskUpdate'
+            example:
+              title: Экран «Мои задачи» с быстрыми фильтрами
+              type: improvement
+              version: 4
+      responses:
+        '200':
+          description: Задача изменена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              example:
+                id: 42
+                projectId: 7
+                title: Экран «Мои задачи» с быстрыми фильтрами
+                description: Список задач исполнителя с быстрыми фильтрами
+                status: in_progress
+                type: improvement
+                author: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                assignee: {id: 12, login: ryan, firstName: Райан, lastName: Мельник, email: ryan@pinkmine.by}
+                dueDate: '2026-10-25'
+                overdue: false
+                tags: []
+                version: 5
+                createdAt: '2026-10-14T07:00:00Z'
+                updatedAt: '2026-10-21T09:20:00Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Нет права на изменение типа
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                errorCode: TASK_TYPE_FORBIDDEN
+                message: Менять тип задачи может менеджер проекта
+                details: [{field: type, reason: PERMISSION_REQUIRED}]
+                traceId: 29708192-a3b4-40c5-8051-b0c1d2e3f401
+        '404':
+          $ref: '#/components/responses/TaskNotFound'
+        '409':
+          $ref: '#/components/responses/TaskConflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/tasks/{taskId}/status:
+    patch:
+      tags: [tasks]
+      operationId: changeTaskStatus
+      summary: Изменить статус задачи
+      description: |
+        UC-T3, UC-T4, UC-T14. Постановка метода из ЛР3 (срезы S9, S11, S12, S17 Event Modeling).
+        - closed выставляет только пользователь с правом task.close (H2, FR-29);
+        - review → in_progress (возврат на доработку) требует `reasonCommentId` (US-8.4, FR-38);
+        - задачи архивного проекта не изменяются (FR-19);
+        - повтор уже применённого запроса возвращает 200 без изменений (идемпотентность офлайн-очереди, H3).
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskStatusUpdate'
+            examples:
+              takeToWork:
+                summary: Взять задачу в работу
+                value:
+                  status: in_progress
+                  version: 3
+              returnToWork:
+                summary: Вернуть на доработку с комментарием
+                value:
+                  status: in_progress
+                  version: 5
+                  reasonCommentId: 118
+      responses:
+        '200':
+          description: Статус изменён или уже совпадает с запрошенным
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskStatusResult'
+              example:
+                id: 42
+                projectId: 7
+                status: in_progress
+                version: 4
+                updatedAt: '2026-10-14T07:12:03Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Недостаточно прав
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                closeForbidden:
+                  value:
+                    errorCode: TASK_CLOSE_FORBIDDEN
+                    message: Закрыть задачу может менеджер проекта
+                    details: []
+                    traceId: 0c4d1e2a-5b7f-4d1c-9a3e-6f2b8c9d0e1f
+                statusChangeForbidden:
+                  value:
+                    errorCode: STATUS_CHANGE_FORBIDDEN
+                    message: Недостаточно прав для изменения статуса
+                    details: []
+                    traceId: 3a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d
+        '404':
+          $ref: '#/components/responses/TaskNotFound'
+        '409':
+          $ref: '#/components/responses/TaskConflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          description: Нет корректного комментария с причиной возврата
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                reasonRequired:
+                  value:
+                    errorCode: REASON_COMMENT_REQUIRED
+                    message: Укажите комментарий с причиной возврата
+                    details: [{field: reasonCommentId, reason: REQUIRED_FOR_RETURN_TO_WORK}]
+                    traceId: 7d6c5b4a-3f2e-4d1c-8b9a-0f1e2d3c4b5a
+                reasonInvalid:
+                  value:
+                    errorCode: REASON_COMMENT_INVALID
+                    message: Комментарий с причиной не найден в этой задаче
+                    details: [{field: reasonCommentId, reason: NOT_IN_TASK}]
+                    traceId: 8e7d6c5b-4a3f-4e2d-9c1b-0a1f2e3d4c5b
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/tasks/{taskId}/assignee:
+    patch:
+      tags: [tasks]
+      operationId: changeTaskAssignee
+      summary: Назначить исполнителя
+      description: "UC-T2. Актор: менеджер проекта (право task.assign). Исполнитель только из участников проекта; `null` снимает исполнителя. Новому исполнителю создаётся уведомление (FR-45)."
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskAssigneeUpdate'
+            example:
+              assigneeId: 12
+              version: 2
+      responses:
+        '200':
+          description: Исполнитель назначен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              example:
+                id: 42
+                projectId: 7
+                title: Экран «Мои задачи»
+                description: null
+                status: new
+                type: task
+                author: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                assignee: {id: 12, login: ryan, firstName: Райан, lastName: Мельник, email: ryan@pinkmine.by}
+                dueDate: '2026-10-25'
+                overdue: false
+                tags: []
+                version: 3
+                createdAt: '2026-10-14T07:00:00Z'
+                updatedAt: '2026-10-14T07:05:00Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Нет права task.assign
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                errorCode: TASK_ASSIGN_FORBIDDEN
+                message: Назначать исполнителя может менеджер проекта
+                details: []
+                traceId: 3a8192a3-b4c5-41d6-8162-c1d2e3f4a512
+        '404':
+          $ref: '#/components/responses/TaskNotFound'
+        '409':
+          $ref: '#/components/responses/TaskConflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          description: Исполнитель не состоит в проекте
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                assigneeNotMember:
+                  $ref: '#/components/examples/AssigneeNotMember'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/tasks/{taskId}/deadline:
+    patch:
+      tags: [tasks]
+      operationId: changeTaskDeadline
+      summary: Перенести срок выполнения
+      description: "UC-T5. Актор: менеджер проекта (право task.set_due_date). Перенос на будущую дату снимает отметку о просрочке и уведомляет исполнителя (FR-54). `null` снимает срок."
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskDeadlineUpdate'
+            example:
+              dueDate: '2026-11-01'
+              version: 5
+      responses:
+        '200':
+          description: Срок изменён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              example:
+                id: 42
+                projectId: 7
+                title: Экран «Мои задачи»
+                description: null
+                status: in_progress
+                type: task
+                author: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                assignee: {id: 12, login: ryan, firstName: Райан, lastName: Мельник, email: ryan@pinkmine.by}
+                dueDate: '2026-11-01'
+                overdue: false
+                tags: []
+                version: 6
+                createdAt: '2026-10-14T07:00:00Z'
+                updatedAt: '2026-10-21T09:30:00Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Нет права task.set_due_date
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                errorCode: TASK_DEADLINE_FORBIDDEN
+                message: Переносить срок может менеджер проекта
+                details: []
+                traceId: 4b92a3b4-c5d6-42e7-9273-d2e3f4a5b623
+        '404':
+          $ref: '#/components/responses/TaskNotFound'
+        '409':
+          $ref: '#/components/responses/TaskConflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          description: Срок в прошлом (FR-23)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                dueDateInPast:
+                  $ref: '#/components/examples/DueDateInPast'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/tasks/{taskId}/history:
+    get:
+      tags: [tasks]
+      operationId: getTaskHistory
+      summary: Просмотреть историю задачи
+      description: "UC-T9. Записи task_history в хронологическом порядке (FR-30)."
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: История изменений
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/HistoryEntry'
+              example:
+                - id: 301
+                  taskVersion: 4
+                  author: {id: 12, login: ryan, firstName: Райан, lastName: Мельник, email: ryan@pinkmine.by}
+                  field: status
+                  oldValue: new
+                  newValue: in_progress
+                  reasonCommentId: null
+                  createdAt: '2026-10-14T07:12:03Z'
+                - id: 309
+                  taskVersion: 6
+                  author: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                  field: status
+                  oldValue: review
+                  newValue: in_progress
+                  reasonCommentId: 118
+                  createdAt: '2026-10-21T08:20:00Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/TaskNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/tasks/{taskId}/comments:
+    get:
+      tags: [comments]
+      operationId: listComments
+      summary: Просмотреть обсуждение задачи
+      description: "UC-T10. Комментарии в хронологическом порядке (FR-39)."
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: Комментарии
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Comment'
+              example:
+                - id: 118
+                  taskId: 42
+                  author: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                  body: Не работает фильтр «Просроченные», поправь, пожалуйста
+                  createdAt: '2026-10-21T08:19:00Z'
+                  editedAt: null
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/TaskNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [comments]
+      operationId: addComment
+      summary: Добавить комментарий
+      description: "UC-T10, UC-T4. Актор: участник проекта (право comment.create). Комментарий также служит причиной возврата на доработку. Исполнитель и автор задачи получают уведомление (FR-50)."
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommentBody'
+            example:
+              body: Не работает фильтр «Просроченные», поправь, пожалуйста
+      responses:
+        '201':
+          description: Комментарий добавлен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Comment'
+              example:
+                id: 118
+                taskId: 42
+                author: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                body: Не работает фильтр «Просроченные», поправь, пожалуйста
+                createdAt: '2026-10-21T08:19:00Z'
+                editedAt: null
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CommentForbidden'
+        '404':
+          $ref: '#/components/responses/TaskNotFound'
+        '409':
+          description: Проект в архиве
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                projectArchived:
+                  $ref: '#/components/examples/ProjectArchived'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/comments/{commentId}:
+    patch:
+      tags: [comments]
+      operationId: editComment
+      summary: Изменить свой комментарий
+      description: "UC-T11. Только автор комментария. Отредактированный комментарий помечается `editedAt` (FR-40)."
+      parameters:
+        - $ref: '#/components/parameters/CommentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommentBody'
+            example:
+              body: Не работает фильтр «Просроченные» на Android, поправь, пожалуйста
+      responses:
+        '200':
+          description: Комментарий изменён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Comment'
+              example:
+                id: 118
+                taskId: 42
+                author: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                body: Не работает фильтр «Просроченные» на Android, поправь, пожалуйста
+                createdAt: '2026-10-21T08:19:00Z'
+                editedAt: '2026-10-21T08:25:00Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CommentNotAuthor'
+        '404':
+          $ref: '#/components/responses/CommentNotFound'
+        '409':
+          description: Проект в архиве
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                projectArchived:
+                  $ref: '#/components/examples/ProjectArchived'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [comments]
+      operationId: deleteComment
+      summary: Удалить свой комментарий
+      description: "UC-T11. Только автор комментария. Ссылка на комментарий в истории задачи обнуляется (ON DELETE SET NULL)."
+      parameters:
+        - $ref: '#/components/parameters/CommentId'
+      responses:
+        '204':
+          description: Комментарий удалён
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CommentNotAuthor'
+        '404':
+          $ref: '#/components/responses/CommentNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/tasks/{taskId}/attachments:
+    get:
+      tags: [attachments]
+      operationId: listAttachments
+      summary: Просмотреть вложения задачи
+      description: "UC-T12. Вложения с именем, размером и автором (FR-41)."
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: Вложения
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Attachment'
+              example:
+                - id: 55
+                  taskId: 42
+                  fileName: my_tasks_mockup.png
+                  contentType: image/png
+                  sizeBytes: 245760
+                  author: {id: 12, login: ryan, firstName: Райан, lastName: Мельник, email: ryan@pinkmine.by}
+                  createdAt: '2026-10-20T15:40:00Z'
+                  downloadUrl: /api/attachments/55
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/TaskNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [attachments]
+      operationId: uploadAttachment
+      summary: Прикрепить файл
+      description: "UC-T12. Актор: участник проекта (право comment.create). Размер файла до 20 МБ; файл хранится во внешнем хранилище, в БД только метаданные (предположение A3)."
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Файл до 20 МБ
+      responses:
+        '201':
+          description: Файл прикреплён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Attachment'
+              example:
+                id: 56
+                taskId: 42
+                fileName: crash_log.txt
+                contentType: text/plain
+                sizeBytes: 5120
+                author: {id: 12, login: ryan, firstName: Райан, lastName: Мельник, email: ryan@pinkmine.by}
+                createdAt: '2026-10-21T09:40:00Z'
+                downloadUrl: /api/attachments/56
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CommentForbidden'
+        '404':
+          $ref: '#/components/responses/TaskNotFound'
+        '409':
+          description: Проект в архиве
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                projectArchived:
+                  $ref: '#/components/examples/ProjectArchived'
+        '413':
+          description: Файл больше 20 МБ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                errorCode: FILE_TOO_LARGE
+                message: Размер файла не должен превышать 20 МБ
+                details: [{field: file, reason: MAX_SIZE_20MB}]
+                traceId: 5ca3b4c5-d6e7-43f8-8384-e3f4a5b6c734
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/attachments/{attachmentId}:
+    get:
+      tags: [attachments]
+      operationId: downloadAttachment
+      summary: Скачать вложение
+      description: "UC-T12. Возвращает содержимое файла."
+      parameters:
+        - name: attachmentId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+          example: 55
+      responses:
+        '200':
+          description: Содержимое файла
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+                example: attachment; filename="my_tasks_mockup.png"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Вложение не найдено
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                errorCode: ATTACHMENT_NOT_FOUND
+                message: Вложение не найдено
+                details: []
+                traceId: 6db4c5d6-e7f8-44a9-9495-f4a5b6c7d845
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/projects/{projectId}/tags:
+    get:
+      tags: [tags]
+      operationId: listTags
+      summary: Просмотреть теги проекта
+      description: "UC-T13, UC-T7. Теги используются в фильтре задач."
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200':
+          description: Теги проекта
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Tag'
+              example:
+                - {id: 3, name: android, color: '#3DDC84'}
+                - {id: 4, name: web, color: '#1E88E5'}
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/ProjectNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [tags]
+      operationId: createTag
+      summary: Создать тег
+      description: "UC-T13. Актор: менеджер проекта (право task.assign). Название уникально в проекте без учёта регистра."
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TagCreate'
+            example:
+              name: backend
+              color: '#8E24AA'
+      responses:
+        '201':
+          description: Тег создан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tag'
+              example:
+                id: 5
+                name: backend
+                color: '#8E24AA'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/TagManageForbidden'
+        '404':
+          $ref: '#/components/responses/ProjectNotFound'
+        '409':
+          description: Тег с таким названием уже есть или проект в архиве
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                tagNameTaken:
+                  value:
+                    errorCode: TAG_NAME_TAKEN
+                    message: Тег с таким названием уже есть в проекте
+                    details: [{field: name, reason: NOT_UNIQUE}]
+                    traceId: 7ec5d6e7-f809-45ba-85a6-a5b6c7d8e956
+                projectArchived:
+                  $ref: '#/components/examples/ProjectArchived'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/tasks/{taskId}/tags:
+    put:
+      tags: [tags]
+      operationId: replaceTaskTags
+      summary: Задать теги задачи
+      description: "UC-T13. Полностью заменяет набор тегов задачи. Теги должны принадлежать проекту задачи."
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskTagsUpdate'
+            example:
+              tagIds: [3, 5]
+      responses:
+        '200':
+          description: Теги задачи
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Tag'
+              example:
+                - {id: 3, name: android, color: '#3DDC84'}
+                - {id: 5, name: backend, color: '#8E24AA'}
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/TagManageForbidden'
+        '404':
+          $ref: '#/components/responses/TaskNotFound'
+        '409':
+          description: Проект в архиве
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                projectArchived:
+                  $ref: '#/components/examples/ProjectArchived'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          description: Тег из другого проекта
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                tagNotInProject:
+                  $ref: '#/components/examples/TagNotInProject'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/notifications:
+    get:
+      tags: [notifications]
+      operationId: listNotifications
+      summary: Просмотреть уведомления
+      description: "UC-N1. Лента уведомлений канала in_app, новые сверху, пагинация по ключу (атрибут качества 6.2)."
+      parameters:
+        - name: unreadOnly
+          in: query
+          schema:
+            type: boolean
+            default: false
+        - name: cursor
+          in: query
+          description: Значение `nextCursor` из предыдущего ответа
+          schema:
+            type: string
+            maxLength: 200
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Страница уведомлений
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationPage'
+              example:
+                items:
+                  - id: 901
+                    eventType: task_assigned
+                    body: 'Pinkmine Mobile: вам назначена задача «Экран «Мои задачи»»'
+                    taskId: 42
+                    projectId: 7
+                    createdAt: '2026-10-14T07:05:00Z'
+                    readAt: null
+                nextCursor: MjAyNi0xMC0xNFQwNzowNTowMFp8OTAx
+                unreadCount: 1
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/notifications/{notificationId}/read:
+    patch:
+      tags: [notifications]
+      operationId: markNotificationRead
+      summary: Отметить уведомление прочитанным
+      description: "UC-N2. Повторная отметка не меняет `readAt` (идемпотентно)."
+      parameters:
+        - name: notificationId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+          example: 901
+      responses:
+        '200':
+          description: Уведомление прочитано
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+              example:
+                id: 901
+                eventType: task_assigned
+                body: 'Pinkmine Mobile: вам назначена задача «Экран «Мои задачи»»'
+                taskId: 42
+                projectId: 7
+                createdAt: '2026-10-14T07:05:00Z'
+                readAt: '2026-10-14T07:06:10Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Уведомление не найдено или адресовано другому пользователю
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                errorCode: NOTIFICATION_NOT_FOUND
+                message: Уведомление не найдено
+                details: []
+                traceId: 8fd6e7f8-091a-46cb-96b7-b6c7d8e9fa67
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/notifications/read-all:
+    post:
+      tags: [notifications]
+      operationId: markAllNotificationsRead
+      summary: Отметить все уведомления прочитанными
+      description: "UC-N2."
+      responses:
+        '200':
+          description: Количество отмеченных уведомлений
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadAllResult'
+              example:
+                updated: 5
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/devices:
+    post:
+      tags: [notifications]
+      operationId: registerDevice
+      summary: Зарегистрировать токен устройства
+      description: "UC-N3. Актор: участник команды (Android). Токен FCM уникален; повторная регистрация того же токена обновляет `lastSeenAt` и возвращает 200."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceRegister'
+            example:
+              platform: android
+              token: fcm-dGVzdC10b2tlbi1waW5rbWluZS1hbmRyb2lk
+      responses:
+        '200':
+          description: Токен уже был зарегистрирован, обновлён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+              example:
+                id: 14
+                platform: android
+                createdAt: '2026-10-01T06:00:00Z'
+                lastSeenAt: '2026-10-21T09:00:00Z'
+        '201':
+          description: Токен зарегистрирован
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+              example:
+                id: 15
+                platform: android
+                createdAt: '2026-10-21T09:00:00Z'
+                lastSeenAt: '2026-10-21T09:00:00Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/devices/{deviceId}:
+    delete:
+      tags: [notifications]
+      operationId: unregisterDevice
+      summary: Удалить токен устройства
+      description: "UC-N3. Выполняется при выходе из приложения на Android."
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+          example: 14
+      responses:
+        '204':
+          description: Токен удалён
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Устройство не найдено
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                errorCode: DEVICE_NOT_FOUND
+                message: Устройство не найдено
+                details: []
+                traceId: 90e7f809-1a2b-47dc-87c8-c7d8e9fa0b78
+        '500':
+          $ref: '#/components/responses/InternalError'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Токен доступа из `POST /api/auth/login`
+  parameters:
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      description: Идентификатор проекта
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+      example: 7
+    TaskId:
+      name: taskId
+      in: path
+      required: true
+      description: Идентификатор задачи
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+      example: 42
+    UserId:
+      name: userId
+      in: path
+      required: true
+      description: Идентификатор пользователя
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+      example: 12
+    RoleId:
+      name: roleId
+      in: path
+      required: true
+      description: Идентификатор роли
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+      example: 3
+    CommentId:
+      name: commentId
+      in: path
+      required: true
+      description: Идентификатор комментария
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+      example: 118
+    InviteToken:
+      name: token
+      in: path
+      required: true
+      description: Токен из ссылки приглашения
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+        pattern: '^[A-Za-z0-9_-]+$'
+      example: inv_Hk3sP0qLw8ZtYb2cR5mN
+    Page:
+      name: page
+      in: query
+      description: Номер страницы
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    Size:
+      name: size
+      in: query
+      description: Размер страницы
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+  examples:
+    ProjectArchived:
+      summary: Проект в архиве
+      value:
+        errorCode: PROJECT_ARCHIVED
+        message: Проект в архиве, изменение задач недоступно
+        details: []
+        traceId: 1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9
+    AssigneeNotMember:
+      summary: Исполнитель не из проекта
+      value:
+        errorCode: ASSIGNEE_NOT_MEMBER
+        message: Исполнителем может быть только участник проекта
+        details: [{field: assigneeId, reason: NOT_PROJECT_MEMBER}]
+        traceId: a1f8091a-2b3c-48ed-98d9-d8e9fa0b1c89
+    DueDateInPast:
+      summary: Срок в прошлом
+      value:
+        errorCode: DUE_DATE_IN_PAST
+        message: Срок не может быть в прошлом
+        details: [{field: dueDate, reason: BEFORE_TODAY}]
+        traceId: b2091a2b-3c4d-49fe-89ea-e9fa0b1c2d9a
+    TagNotInProject:
+      summary: Тег из другого проекта
+      value:
+        errorCode: TAG_NOT_IN_PROJECT
+        message: Тег не принадлежит проекту задачи
+        details: [{field: 'tagIds[0]', reason: NOT_IN_PROJECT}]
+        traceId: c31a2b3c-4d5e-4a0f-9afb-fa0b1c2d3eab
+  responses:
+    ValidationError:
+      description: Некорректный JSON, тип, формат значения или лишнее поле
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            errorCode: VALIDATION_ERROR
+            message: Запрос содержит некорректные данные
+            details: [{field: title, reason: REQUIRED}]
+            traceId: d42b3c4d-5e6f-4b10-8b0c-0b1c2d3e4fbc
+    Unauthorized:
+      description: Нет токена, токен истёк или недействителен
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            example: Bearer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            errorCode: UNAUTHORIZED
+            message: Требуется авторизация
+            details: []
+            traceId: b2d6949c-60fa-4ef8-8a18-1bde451f7e7d
+    UnsupportedMediaType:
+      description: Content-Type не поддерживается
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            errorCode: UNSUPPORTED_MEDIA_TYPE
+            message: Неподдерживаемый формат запроса
+            details: []
+            traceId: e53c4d5e-6f70-4c21-9c1d-1c2d3e4f5acd
+    InternalError:
+      description: Непредвиденная ошибка
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            errorCode: INTERNAL_ERROR
+            message: Внутренняя ошибка сервера
+            details: []
+            traceId: 3c2b1a09-8f7e-4d6c-9b5a-4e3d2c1b0a9f
+    TokenInvalid:
+      description: Токен не найден, истёк или уже использован
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            errorCode: TOKEN_INVALID
+            message: Ссылка недействительна или устарела
+            details: [{field: token, reason: EXPIRED_OR_USED}]
+            traceId: f64d5e6f-7081-4d32-8d2e-2d3e4f5a6bde
+    RoleManageForbidden:
+      description: Нет права role.manage (FR-10)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            errorCode: ROLE_MANAGE_FORBIDDEN
+            message: Раздел «Роли и права» доступен только администратору
+            details: []
+            traceId: 075e6f70-8192-4e43-9e3f-3e4f5a6b7cef
+    MemberManageForbidden:
+      description: Нет права member.add или member.remove
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            errorCode: MEMBER_MANAGE_FORBIDDEN
+            message: Управлять командой может менеджер проекта
+            details: []
+            traceId: 186f7081-92a3-4f54-8f40-4f5a6b7c8df0
+    TagManageForbidden:
+      description: Нет права task.assign
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            errorCode: TAG_MANAGE_FORBIDDEN
+            message: Управлять тегами может менеджер проекта
+            details: []
+            traceId: 29708192-a3b4-4065-8051-5a6b7c8d9e01
+    CommentForbidden:
+      description: Нет права comment.create
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            errorCode: COMMENT_FORBIDDEN
+            message: Недостаточно прав для комментирования
+            details: []
+            traceId: 3a8192a3-b4c5-4176-8162-6b7c8d9e0f12
+    CommentNotAuthor:
+      description: Изменять и удалять комментарий может только автор
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            errorCode: COMMENT_NOT_AUTHOR
+            message: Изменить комментарий может только его автор
+            details: []
+            traceId: 4b92a3b4-c5d6-4287-9273-7c8d9e0f1a23
+    ProjectNotFound:
+      description: Проект не найден или пользователь не состоит в нём
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            errorCode: PROJECT_NOT_FOUND
+            message: Проект не найден
+            details: []
+            traceId: 5ca3b4c5-d6e7-4398-8384-8d9e0f1a2b34
+    TaskNotFound:
+      description: Задача не найдена или пользователь не состоит в её проекте
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            errorCode: TASK_NOT_FOUND
+            message: Задача не найдена
+            details: []
+            traceId: 4e7a2b1c-8d3f-4a6e-b5c9-1d2e3f4a5b6c
+    CommentNotFound:
+      description: Комментарий не найден
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            errorCode: COMMENT_NOT_FOUND
+            message: Комментарий не найден
+            details: []
+            traceId: 6db4c5d6-e7f8-44a9-9495-9e0f1a2b3c45
+    InviteNotFound:
+      description: Приглашение не найдено
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            errorCode: INVITE_NOT_FOUND
+            message: Приглашение не найдено
+            details: []
+            traceId: 7ec5d6e7-f809-45ba-85a6-0f1a2b3c4d56
+    InviteGone:
+      description: Приглашение истекло, отозвано или уже принято другим пользователем (FR-17)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            errorCode: INVITE_EXPIRED
+            message: Приглашение недействительно, обратитесь к менеджеру проекта
+            details: []
+            traceId: 8fd6e7f8-091a-46cb-96b7-1a2b3c4d5e67
+    TaskConflict:
+      description: Версия устарела (H3, FR-31) или проект в архиве (FR-19)
+      content:
+        application/json:
+          schema:
+            anyOf:
+              - $ref: '#/components/schemas/VersionConflictError'
+              - $ref: '#/components/schemas/Error'
+          examples:
+            versionConflict:
+              summary: Задача изменена другим пользователем
+              value:
+                errorCode: TASK_VERSION_CONFLICT
+                message: Задача изменена другим пользователем
+                details: [{field: version, reason: STALE_VERSION}]
+                traceId: 9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
+                current:
+                  id: 42
+                  projectId: 7
+                  title: Экран «Мои задачи»
+                  description: null
+                  status: review
+                  type: task
+                  author: {id: 11, login: jessica, firstName: Джесика, lastName: Ковалёва, email: jessica@pinkmine.by}
+                  assignee: {id: 12, login: ryan, firstName: Райан, lastName: Мельник, email: ryan@pinkmine.by}
+                  dueDate: '2026-10-25'
+                  overdue: false
+                  tags: []
+                  version: 5
+                  createdAt: '2026-10-14T07:00:00Z'
+                  updatedAt: '2026-10-21T08:15:00Z'
+            projectArchived:
+              $ref: '#/components/examples/ProjectArchived'
+  schemas:
+    Id:
+      type: integer
+      format: int64
+      minimum: 1
+      example: 42
+    TaskStatusCode:
+      type: string
+      description: Код статуса задачи (task_statuses.code)
+      enum: [new, in_progress, review, postponed, done, closed]
+    TaskTypeCode:
+      type: string
+      description: Код типа задачи (task_types.code)
+      enum: [task, bug, improvement, idea, meeting]
+    RoleCode:
+      type: string
+      description: Код глобальной роли (roles.code)
+      enum: [admin, manager, member]
+    ProjectRoleCode:
+      type: string
+      description: Роль в проекте (project_members.role_id)
+      enum: [manager, member]
+    PermissionCode:
+      type: string
+      description: Код права (permissions.code)
+      enum: [project.create, project.archive, project.delete, member.add, member.remove, task.create, task.assign, task.set_due_date, task.change_status, task.review, task.close, comment.create, role.manage]
+    Error:
+      type: object
+      required: [errorCode, message, details, traceId]
+      properties:
+        errorCode:
+          type: string
+          description: Машиночитаемый код ошибки
+          example: VALIDATION_ERROR
+        message:
+          type: string
+          description: Сообщение для пользователя
+        details:
+          type: array
+          items:
+            $ref: '#/components/schemas/ErrorDetail'
+        traceId:
+          type: string
+          format: uuid
+          description: Идентификатор запроса в журналах сервера
+    ErrorDetail:
+      type: object
+      required: [field, reason]
+      properties:
+        field:
+          type: string
+          description: JSON path поля
+          example: title
+        reason:
+          type: string
+          example: REQUIRED
+    VersionConflictError:
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          required: [current]
+          properties:
+            current:
+              $ref: '#/components/schemas/Task'
+    UserShort:
+      type: object
+      required: [id, login, firstName, lastName, email]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        login:
+          type: string
+        firstName:
+          type: string
+        lastName:
+          type: string
+        email:
+          type: string
+          format: email
+    UserProfile:
+      type: object
+      required: [id, login, email, firstName, lastName, role, emailConfirmed, permissions, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        login:
+          type: string
+        email:
+          type: string
+          format: email
+        firstName:
+          type: string
+        lastName:
+          type: string
+        role:
+          $ref: '#/components/schemas/RoleCode'
+        emailConfirmed:
+          type: boolean
+          description: false — в профиле показывается баннер «Подтвердите email» (FR-04)
+        permissions:
+          type: array
+          description: Права глобальной роли
+          items:
+            $ref: '#/components/schemas/PermissionCode'
+        createdAt:
+          type: string
+          format: date-time
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [login, email, password, firstName, lastName]
+      properties:
+        login:
+          type: string
+          minLength: 3
+          maxLength: 50
+          pattern: '^[A-Za-z0-9_.-]+$'
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 128
+          description: Не менее 8 символов (FR-03)
+        firstName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        lastName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        inviteToken:
+          type: string
+          minLength: 16
+          maxLength: 128
+          description: Токен приглашения, если регистрация начата по ссылке (FR-17)
+    TokenRequest:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token:
+          type: string
+          minLength: 16
+          maxLength: 128
+    EmailConfirmResult:
+      type: object
+      required: [emailConfirmed, emailConfirmedAt]
+      properties:
+        emailConfirmed:
+          type: boolean
+        emailConfirmedAt:
+          type: string
+          format: date-time
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [login, password]
+      properties:
+        login:
+          type: string
+          minLength: 1
+          maxLength: 254
+          description: Логин или email
+        password:
+          type: string
+          format: password
+          minLength: 1
+          maxLength: 128
+    LoginResponse:
+      type: object
+      required: [accessToken, tokenType, expiresIn, user]
+      properties:
+        accessToken:
+          type: string
+        tokenType:
+          type: string
+          enum: [Bearer]
+        expiresIn:
+          type: integer
+          description: Время жизни токена в секундах
+        user:
+          $ref: '#/components/schemas/UserProfile'
+    PasswordForgotRequest:
+      type: object
+      additionalProperties: false
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+    PasswordResetRequest:
+      type: object
+      additionalProperties: false
+      required: [token, newPassword]
+      properties:
+        token:
+          type: string
+          minLength: 16
+          maxLength: 128
+        newPassword:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 128
+    MessageResult:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+    DictionaryItem:
+      type: object
+      required: [code, name]
+      properties:
+        code:
+          type: string
+        name:
+          type: string
+    TaskStatusItem:
+      type: object
+      required: [code, name, sortOrder, isCompleted]
+      properties:
+        code:
+          $ref: '#/components/schemas/TaskStatusCode'
+        name:
+          type: string
+        sortOrder:
+          type: integer
+          description: Порядок колонки Канбан-доски
+        isCompleted:
+          type: boolean
+          description: done и closed — завершённые
+    Dictionaries:
+      type: object
+      required: [taskStatuses, taskTypes, roles]
+      properties:
+        taskStatuses:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskStatusItem'
+        taskTypes:
+          type: array
+          items:
+            $ref: '#/components/schemas/DictionaryItem'
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/DictionaryItem'
+    Permission:
+      type: object
+      required: [code, description]
+      properties:
+        code:
+          $ref: '#/components/schemas/PermissionCode'
+        description:
+          type: string
+    Role:
+      type: object
+      required: [id, code, name, permissions]
+      properties:
+        id:
+          type: integer
+          format: int32
+        code:
+          $ref: '#/components/schemas/RoleCode'
+        name:
+          type: string
+        permissions:
+          type: array
+          items:
+            $ref: '#/components/schemas/PermissionCode'
+    RolePermissionsUpdate:
+      type: object
+      additionalProperties: false
+      required: [permissions]
+      properties:
+        permissions:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            pattern: '^[a-z_.]+$'
+    Project:
+      type: object
+      required: [id, name, description, archived, archivedAt, createdBy, createdAt, myRole, taskCounts]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        archived:
+          type: boolean
+        archivedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdBy:
+          $ref: '#/components/schemas/UserShort'
+        createdAt:
+          type: string
+          format: date-time
+        myRole:
+          type: string
+          nullable: true
+          enum: [manager, member, null]
+          description: Роль текущего пользователя в проекте (null для администратора вне команды)
+        taskCounts:
+          type: object
+          description: Количество задач по кодам статусов
+          additionalProperties:
+            type: integer
+            minimum: 0
+    ProjectCreate:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 5000
+          nullable: true
+    ProjectArchiveRequest:
+      type: object
+      additionalProperties: false
+      required: [archived]
+      properties:
+        archived:
+          type: boolean
+    ProjectPage:
+      type: object
+      required: [items, page, size, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Project'
+        page:
+          type: integer
+        size:
+          type: integer
+        total:
+          type: integer
+    Member:
+      type: object
+      required: [user, role, joinedAt]
+      properties:
+        user:
+          $ref: '#/components/schemas/UserShort'
+        role:
+          $ref: '#/components/schemas/ProjectRoleCode'
+        joinedAt:
+          type: string
+          format: date-time
+    MemberAdd:
+      type: object
+      additionalProperties: false
+      required: [userId, role]
+      properties:
+        userId:
+          $ref: '#/components/schemas/Id'
+        role:
+          $ref: '#/components/schemas/ProjectRoleCode'
+    Invitation:
+      type: object
+      required: [id, email, role, invitedBy, createdAt, expiresAt, state]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        email:
+          type: string
+          format: email
+        role:
+          $ref: '#/components/schemas/ProjectRoleCode'
+        invitedBy:
+          $ref: '#/components/schemas/UserShort'
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+          description: created_at + 7 дней (H1)
+        state:
+          type: string
+          enum: [active, accepted, revoked, expired]
+    InvitationCreate:
+      type: object
+      additionalProperties: false
+      required: [email, role]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        role:
+          $ref: '#/components/schemas/ProjectRoleCode'
+    InvitationPreview:
+      type: object
+      required: [projectId, projectName, email, role, invitedBy, expiresAt, userExists]
+      properties:
+        projectId:
+          $ref: '#/components/schemas/Id'
+        projectName:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          $ref: '#/components/schemas/ProjectRoleCode'
+        invitedBy:
+          type: object
+          required: [firstName, lastName]
+          properties:
+            firstName:
+              type: string
+            lastName:
+              type: string
+        expiresAt:
+          type: string
+          format: date-time
+        userExists:
+          type: boolean
+          description: true — клиент открывает вход, false — регистрацию с заполненным email
+    InvitationAcceptResult:
+      type: object
+      required: [projectId, role, joinedAt]
+      properties:
+        projectId:
+          $ref: '#/components/schemas/Id'
+        role:
+          $ref: '#/components/schemas/ProjectRoleCode'
+        joinedAt:
+          type: string
+          format: date-time
+    Tag:
+      type: object
+      required: [id, name, color]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        name:
+          type: string
+        color:
+          type: string
+          pattern: '^#[0-9A-Fa-f]{6}$'
+    TagCreate:
+      type: object
+      additionalProperties: false
+      required: [name, color]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 50
+        color:
+          type: string
+          pattern: '^#[0-9A-Fa-f]{6}$'
+    TaskTagsUpdate:
+      type: object
+      additionalProperties: false
+      required: [tagIds]
+      properties:
+        tagIds:
+          type: array
+          uniqueItems: true
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/Id'
+    Task:
+      type: object
+      required: [id, projectId, title, description, status, type, author, assignee, dueDate, overdue, tags, version, createdAt, updatedAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        projectId:
+          $ref: '#/components/schemas/Id'
+        title:
+          type: string
+        description:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/TaskStatusCode'
+        type:
+          $ref: '#/components/schemas/TaskTypeCode'
+        author:
+          $ref: '#/components/schemas/UserShort'
+        assignee:
+          allOf:
+            - $ref: '#/components/schemas/UserShort'
+          nullable: true
+        dueDate:
+          type: string
+          format: date
+          nullable: true
+        overdue:
+          type: boolean
+          description: Вычисляется, хранится только факт уведомления (FR-51)
+        tags:
+          type: array
+          items:
+            $ref: '#/components/schemas/Tag'
+        version:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Версия для оптимистической блокировки
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    TaskDetails:
+      allOf:
+        - $ref: '#/components/schemas/Task'
+        - type: object
+          required: [commentCount, attachmentCount, projectArchived]
+          properties:
+            commentCount:
+              type: integer
+              minimum: 0
+            attachmentCount:
+              type: integer
+              minimum: 0
+            projectArchived:
+              type: boolean
+              description: true — клиент скрывает кнопки изменения
+    TaskPage:
+      type: object
+      required: [items, page, size, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Task'
+        page:
+          type: integer
+        size:
+          type: integer
+        total:
+          type: integer
+    TaskCreate:
+      type: object
+      additionalProperties: false
+      required: [title]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 10000
+          nullable: true
+        type:
+          allOf:
+            - $ref: '#/components/schemas/TaskTypeCode'
+          default: task
+        assigneeId:
+          type: integer
+          format: int64
+          minimum: 1
+          nullable: true
+        dueDate:
+          type: string
+          format: date
+          nullable: true
+        tagIds:
+          type: array
+          uniqueItems: true
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/Id'
+    TaskUpdate:
+      type: object
+      additionalProperties: false
+      required: [version]
+      minProperties: 2
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 10000
+          nullable: true
+        type:
+          $ref: '#/components/schemas/TaskTypeCode'
+        version:
+          type: integer
+          format: int32
+          minimum: 1
+    TaskStatusUpdate:
+      type: object
+      additionalProperties: false
+      required: [status, version]
+      properties:
+        status:
+          $ref: '#/components/schemas/TaskStatusCode'
+        version:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Версия задачи, на которой основано изменение
+        reasonCommentId:
+          type: integer
+          format: int64
+          minimum: 1
+          nullable: true
+          description: Обязателен при переходе review → in_progress
+    TaskStatusResult:
+      type: object
+      required: [id, projectId, status, version, updatedAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        projectId:
+          $ref: '#/components/schemas/Id'
+        status:
+          $ref: '#/components/schemas/TaskStatusCode'
+        version:
+          type: integer
+          format: int32
+        updatedAt:
+          type: string
+          format: date-time
+    TaskAssigneeUpdate:
+      type: object
+      additionalProperties: false
+      required: [assigneeId, version]
+      properties:
+        assigneeId:
+          type: integer
+          format: int64
+          minimum: 1
+          nullable: true
+        version:
+          type: integer
+          format: int32
+          minimum: 1
+    TaskDeadlineUpdate:
+      type: object
+      additionalProperties: false
+      required: [dueDate, version]
+      properties:
+        dueDate:
+          type: string
+          format: date
+          nullable: true
+        version:
+          type: integer
+          format: int32
+          minimum: 1
+    HistoryEntry:
+      type: object
+      required: [id, taskVersion, author, field, oldValue, newValue, reasonCommentId, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        taskVersion:
+          type: integer
+          format: int32
+        author:
+          $ref: '#/components/schemas/UserShort'
+        field:
+          type: string
+          enum: [title, description, status, type, assignee, due_date]
+        oldValue:
+          type: string
+          nullable: true
+        newValue:
+          type: string
+          nullable: true
+        reasonCommentId:
+          type: integer
+          format: int64
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+    Comment:
+      type: object
+      required: [id, taskId, author, body, createdAt, editedAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        taskId:
+          $ref: '#/components/schemas/Id'
+        author:
+          $ref: '#/components/schemas/UserShort'
+        body:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        editedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Не null — комментарий помечается «изменено»
+    CommentBody:
+      type: object
+      additionalProperties: false
+      required: [body]
+      properties:
+        body:
+          type: string
+          minLength: 1
+          maxLength: 5000
+          pattern: '\S'
+          description: Пустой комментарий не сохраняется (FR-39)
+    Attachment:
+      type: object
+      required: [id, taskId, fileName, contentType, sizeBytes, author, createdAt, downloadUrl]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        taskId:
+          $ref: '#/components/schemas/Id'
+        fileName:
+          type: string
+        contentType:
+          type: string
+        sizeBytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 20971520
+        author:
+          $ref: '#/components/schemas/UserShort'
+        createdAt:
+          type: string
+          format: date-time
+        downloadUrl:
+          type: string
+    Notification:
+      type: object
+      required: [id, eventType, body, taskId, projectId, createdAt, readAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        eventType:
+          type: string
+          enum: [member_invited, member_added, task_assigned, task_status_changed, task_deadline_changed, task_overdue, comment_added, overdue_digest]
+        body:
+          type: string
+        taskId:
+          type: integer
+          format: int64
+          nullable: true
+        projectId:
+          type: integer
+          format: int64
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        readAt:
+          type: string
+          format: date-time
+          nullable: true
+    NotificationPage:
+      type: object
+      required: [items, nextCursor, unreadCount]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Notification'
+        nextCursor:
+          type: string
+          nullable: true
+        unreadCount:
+          type: integer
+          minimum: 0
+    ReadAllResult:
+      type: object
+      required: [updated]
+      properties:
+        updated:
+          type: integer
+          minimum: 0
+    DeviceRegister:
+      type: object
+      additionalProperties: false
+      required: [platform, token]
+      properties:
+        platform:
+          type: string
+          enum: [android]
+        token:
+          type: string
+          minLength: 20
+          maxLength: 4096
+          description: Токен Firebase Cloud Messaging
+    Device:
+      type: object
+      required: [id, platform, createdAt, lastSeenAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        platform:
+          type: string
+          enum: [android]
+        createdAt:
+          type: string
+          format: date-time
+        lastSeenAt:
+          type: string
+          format: date-time
