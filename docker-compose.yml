@@ -1,0 +1,43 @@
+# Локальное окружение Pinkmine: PostgreSQL + REST API + веб-клиент.
+# Репозитории hci-10-backend-api-group-9 и hci-10-frontend-group-9 должны лежать рядом с основным (пути можно переопределить в .env).
+name: pinkmine
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pinkmine}
+      POSTGRES_USER: ${POSTGRES_USER:-pinkmine}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pinkmine}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docs/pinkmine_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 5s
+      retries: 10
+
+  backend:
+    build: ${BACKEND_PATH:-../hci-10-backend-api-group-9}
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql://${POSTGRES_USER:-pinkmine}:${POSTGRES_PASSWORD:-pinkmine}@db:5432/${POSTGRES_DB:-pinkmine}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build: ${WEB_PATH:-../hci-10-frontend-group-9}
+    environment:
+      API_URL: http://backend:8000
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
