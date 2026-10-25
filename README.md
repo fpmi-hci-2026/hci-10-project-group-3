@@ -47,7 +47,7 @@ python -m pinkmine_mcp --reset
 
 | Репозиторий | Описание |
 |---|---|
-| [hci-10-backend-api-group-9](https://github.com/fpmi-hci-2026/hci-10-backend-api-group-9) | Сервер на Python и Flask: REST API (спецификация OpenAPI, mock-сервер, тесты, коллекция Bruno), MCP-сервер, Dockerfile, CI/CD с деплоем на Render |
+| [hci-10-backend-api-group-9](https://github.com/fpmi-hci-2026/hci-10-backend-api-group-9) | Сервер на Python и Flask: REST API (спецификация OpenAPI, mock-сервер, тесты, коллекция Bruno), MCP-сервер, Dockerfile, CI/CD с деплоем на сервер |
 | [hci-10-frontend-group-9](https://github.com/fpmi-hci-2026/hci-10-frontend-group-9) | Веб-клиент: Канбан-доска, список задач, команда, роли и права. Раздаётся nginx в Docker |
 | [hci-10-mobile-group-9](https://github.com/fpmi-hci-2026/hci-10-mobile-group-9) | Мобильное приложение для Android на Flutter: «Мои задачи», смена статуса, push-уведомления, офлайн-режим |
 
@@ -62,7 +62,7 @@ python -m pinkmine_mcp --reset
 | Swagger UI реализованных маршрутов | http://localhost:8000/api/docs |
 | PostgreSQL | localhost:5432, БД `pinkmine` |
 
-- Развёрнутый API: `<URL Render>/api/hello`.
+- Развёрнутый API: http://31.129.97.200/api/hello, Swagger UI: http://31.129.97.200/api/docs.
 - Документация проекта: [вики](https://github.com/fpmi-hci-2026/hci-10-project-group-3/wiki).
 - Отчёты по лабораторным работам:
   - [Лабораторная работа 1](docs/reports/lab1.pdf)
